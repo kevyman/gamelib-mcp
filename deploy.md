@@ -572,8 +572,9 @@ a backup), `docker compose exec -u 0 app sh` still works.
 6. Delete the previous no-auth/query-token ChatGPT app. Remove
    `MCP_AUTH_TOKEN` from `.env` and never reuse its old value.
 
-If authorization fails, confirm ChatGPT's callback starts with
-`https://chatgpt.com/connector/oauth/`; other client redirect domains are
+If authorization fails, confirm ChatGPT's callback is
+`https://chatgpt.com/connector_platform_oauth_redirect` or starts with
+`https://chatgpt.com/connector/oauth/`; other client redirect URIs are
 rejected deliberately.
 
 ---

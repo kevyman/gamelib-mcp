@@ -19,9 +19,11 @@ from fastmcp.server.auth.providers.github import GitHubProvider
 AuthMode = Literal["oauth", "disabled"]
 
 # Fixed callback for Claude.ai web/desktop/mobile (https://claude.com/docs/connectors/building/authentication);
-# ChatGPT mints a per-connector suffix under its own path, hence the wildcard.
+# ChatGPT mints a per-connector suffix under its own path, hence the wildcard;
+# connectors added since its connector-platform move use one fixed callback.
 _ALLOWED_CLIENT_REDIRECT_URIS = [
     "https://chatgpt.com/connector/oauth/*",
+    "https://chatgpt.com/connector_platform_oauth_redirect",
     "https://claude.ai/api/mcp/auth_callback",
 ]
 # GitHub OAuth Apps issue non-expiring, API-key-style user tokens and return no
