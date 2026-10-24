@@ -387,6 +387,50 @@ class SyncPsnSyncTests(unittest.TestCase):
         mock_repair.assert_not_awaited()
 
 
+def _make_entitlement(title_id, active):
+    return {"titleMeta": {"titleId": title_id}, "activeFlag": active}
+
+
+class FetchPsnLicenseTests(unittest.TestCase):
+    """title_stats lists every title ever played, PS Plus catalog games that
+    have since left the catalog included; game_entitlements says which of them
+    the account still holds a license for."""
+
+    def _run_fetch(self, entries, game_entitlements):
+        mock_client = MagicMock()
+        mock_client.title_stats.return_value = iter(entries)
+        mock_client.game_entitlements = game_entitlements
+        mock_psnawp = MagicMock()
+        mock_psnawp.me.return_value = mock_client
+        with patch("gamelib_mcp.data.psn._get_psnawp", return_value=mock_psnawp):
+            return _run_async(psn.fetch_psn_library())
+
+    def test_license_reflects_whether_any_entitlement_is_active(self) -> None:
+        entries = [
+            _make_entry("Bought", title_id="CUSA00001_00"),
+            _make_entry("Lapsed PS Plus", title_id="CUSA00002_00"),
+            _make_entry("Re-claimed", title_id="CUSA00003_00"),
+            _make_entry("Disc copy", title_id="CUSA00004_00"),
+        ]
+        entitlements = [
+            _make_entitlement("CUSA00001_00", True),
+            _make_entitlement("CUSA00002_00", False),
+            _make_entitlement("CUSA00003_00", False),
+            _make_entitlement("CUSA00003_00", True),
+        ]
+        result = self._run_fetch(entries, MagicMock(return_value=iter(entitlements)))
+        # No entitlement at all is unknown (a disc carries none), never lapsed.
+        self.assertEqual([r["licensed"] for r in result], [True, False, True, None])
+
+    def test_entitlement_failure_leaves_every_license_unknown(self) -> None:
+        result = self._run_fetch(
+            [_make_entry("Elden Ring")],
+            MagicMock(side_effect=Exception("api down")),
+        )
+        self.assertEqual(result[0]["name"], "Elden Ring")
+        self.assertIsNone(result[0]["licensed"])
+
+
 class FetchPsnEnglishResolutionTests(unittest.TestCase):
     def _run_fetch(self, entries, game_title=None):
         mock_client = MagicMock()
@@ -641,6 +685,51 @@ class PsnCrossGenSkuTests(unittest.TestCase):
         ]
         _result, mock_upsert_platform, _ids, _mint = self._run_sync(entries)
         self.assertIsNone(mock_upsert_platform.await_args.kwargs["playtime_minutes"])
+
+
+class PsnLapsedLicenseTests(unittest.TestCase):
+    """A played title whose every entitlement is inactive (a PS Plus catalog
+    game that left the catalog) is no longer owned; anything short of that
+    proof keeps it owned."""
+
+    def _run_sync(self, entries):
+        mock_upsert_platform = AsyncMock(return_value=77)
+        with (
+            patch.dict("os.environ", {"PSN_NPSSO": "fake"}, clear=False),
+            patch("gamelib_mcp.data.psn.fetch_psn_library", AsyncMock(return_value=entries)),
+            patch("gamelib_mcp.data.psn.load_fuzzy_candidates", AsyncMock(return_value={})),
+            patch("gamelib_mcp.data.psn.get_game_by_identifier", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.psn.adopt_platform_identifier", AsyncMock(return_value=None)),
+            patch("gamelib_mcp.data.psn.resolve_and_link_game", AsyncMock(return_value=(42, None))),
+            patch("gamelib_mcp.data.psn.upsert_game_platform", mock_upsert_platform),
+            patch("gamelib_mcp.data.psn.upsert_game_platform_identifier", AsyncMock()),
+        ):
+            _run_async(psn.sync_psn())
+        return mock_upsert_platform
+
+    def test_every_sku_lapsed_writes_the_row_unowned(self) -> None:
+        entries = [
+            {"name": "Moving Out 2", "title_id": "PPSA08206_00",
+             "playtime_minutes": 66, "licensed": False},
+            {"name": "Moving Out 2", "title_id": "CUSA30000_00",
+             "playtime_minutes": 0, "licensed": False},
+        ]
+        mock_upsert_platform = self._run_sync(entries)
+        mock_upsert_platform.assert_awaited_once()
+        self.assertEqual(mock_upsert_platform.await_args.kwargs["owned"], 0)
+
+    def test_one_unknown_sku_keeps_the_row_owned(self) -> None:
+        # The PS4 SKU has no entitlement (a disc), so the lapsed PS5 license
+        # alone does not prove the game is gone.
+        entries = [
+            {"name": "Horizon Forbidden West", "title_id": "PPSA01521_00",
+             "playtime_minutes": 70, "licensed": False},
+            {"name": "Horizon Forbidden West", "title_id": "CUSA24767_00",
+             "playtime_minutes": 5, "licensed": None},
+        ]
+        mock_upsert_platform = self._run_sync(entries)
+        mock_upsert_platform.assert_awaited_once()
+        self.assertEqual(mock_upsert_platform.await_args.kwargs["owned"], 1)
 
 
 class PsnHelperTests(unittest.TestCase):
