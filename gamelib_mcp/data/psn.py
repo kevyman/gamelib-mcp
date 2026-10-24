@@ -10,6 +10,12 @@ over it so a fresh paste always beats a stale ``.env``.
 Library source: client.title_stats() — returns all titles the user has played,
 with name, play_count, and play_duration (datetime.timedelta). Only played titles
 appear; unplayed purchases will not show up (PSN platform limitation).
+
+Ownership: a played title is not necessarily owned — PS Plus catalog games stay
+in title_stats after they leave the catalog. client.game_entitlements() says
+whether each title's license is still active; a game whose every SKU has only
+inactive entitlements is written owned=0 (ADR 0007's lapsed subscription). A
+SKU with no entitlement at all (a disc, a pack-in) is unknown and stays owned.
 """
 
 import asyncio
@@ -126,7 +132,8 @@ class _SkuAggregate:
     """
 
     __slots__ = (
-        "counted_as", "igdb_game", "last_played", "playtime_minutes", "skus", "title",
+        "counted_as", "igdb_game", "lapsed", "last_played", "playtime_minutes", "skus",
+        "title",
     )
 
     def __init__(self, title: str) -> None:
@@ -139,6 +146,9 @@ class _SkuAggregate:
         # Which of added/matched this aggregate was tallied under, so an
         # aggregate evicted onto a freshly minted row can be re-tallied.
         self.counted_as: str | None = None
+        # True while every SKU seen has only inactive entitlements; one active
+        # or unknown SKU keeps the game owned.
+        self.lapsed = True
 
     def add(self, entry: dict, igdb_game: IGDBGame | None = None) -> None:
         minutes = entry.get("playtime_minutes")
@@ -153,6 +163,7 @@ class _SkuAggregate:
             self.skus.append((title_id, minutes or 0))
         if self.igdb_game is None and igdb_game is not None:
             self.igdb_game = igdb_game
+        self.lapsed = self.lapsed and entry.get("licensed") is False
 
     def accepts(self, title: str) -> bool:
         """True when ``title`` is the same game as this aggregate's, edition aside.
@@ -236,10 +247,32 @@ def _get_psnawp() -> "PSNAWP":
     return PSNAWP(npsso)
 
 
+def _fetch_licenses(client: Any) -> dict[str, bool]:
+    """title_id → whether any of its entitlements is active.
+
+    A title missing from the map is unknown, not lapsed: disc copies and
+    pack-ins carry no digital entitlement. A failed fetch returns {} rather
+    than a partial map, so a dropped page can never un-own anything.
+    """
+    licenses: dict[str, bool] = {}
+    try:
+        for entitlement in client.game_entitlements(page_size=200):
+            title_id = (entitlement.get("titleMeta") or {}).get("titleId")
+            if title_id:
+                licenses[title_id] = licenses.get(title_id, False) or bool(
+                    entitlement.get("activeFlag")
+                )
+    except Exception as exc:
+        logger.warning("PSN entitlement fetch failed, keeping every title owned: %s", exc)
+        return {}
+    return licenses
+
+
 async def fetch_psn_library() -> list[dict]:
     """
-    Return a list of dicts with 'name', 'playtime_minutes', and 'last_played'
-    (ISO ``YYYY-MM-DD`` or None) for each played PS5 title.
+    Return a list of dicts with 'name', 'playtime_minutes', 'last_played'
+    (ISO ``YYYY-MM-DD`` or None) and 'licensed' (see _fetch_licenses) for each
+    played PS5 title.
 
     Uses client.title_stats() which returns name, play_count, play_duration
     (a datetime.timedelta), and last_played_date_time. PSN exposes no rolling
@@ -249,6 +282,7 @@ async def fetch_psn_library() -> list[dict]:
     def _fetch() -> list[dict[str, Any]]:
         psnawp = _get_psnawp()
         client = psnawp.me()
+        licenses = _fetch_licenses(client)
         results = []
         for entry in client.title_stats():
             name = entry.name
@@ -275,6 +309,8 @@ async def fetch_psn_library() -> list[dict]:
                     "title_id": title_id,
                     "playtime_minutes": minutes,
                     "last_played": last_played,
+                    # True / False (only inactive entitlements) / None (unknown).
+                    "licensed": licenses.get(title_id) if title_id else None,
                 }
             )
         return results
@@ -450,7 +486,11 @@ async def sync_psn() -> dict:
             platform="ps5",
             playtime_minutes=aggregate.playtime_minutes,
             last_played=aggregate.last_played,
-            owned=1,
+            # A disc shares its title id with the digital SKU, so a disc copy
+            # of a game whose PS Plus license lapsed reads as unowned too — the
+            # entitlements know nothing of discs, and no manual override pins
+            # owned=1 to correct it.
+            owned=0 if aggregate.lapsed else 1,
             from_source=True,
         )
 

@@ -548,15 +548,21 @@ async def upsert_game_platform(
     unowned_at, like every other protected column — but still gets the
     last_seen_in_source stamp, which records what the source SAID rather than
     what the row concluded.
+
+    ``owned=0`` is a source positively reporting the license ended (PSN: every
+    entitlement inactive, i.e. a PS Plus catalog title that left). It stamps
+    unowned_at on the owned→unowned transition (or on insert) and keeps the
+    first stamp after that — without pinning, so the source can re-own it.
     """
     now = datetime.now(UTC).isoformat()
     seen_at = now if from_source else None
+    unowned_at = now if not owned else None
     async with get_db() as db:
         await db.execute(
             """INSERT INTO game_platforms
                (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes,
-                last_played, last_synced, last_seen_in_source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                last_played, last_synced, last_seen_in_source, unowned_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(game_id, platform) DO UPDATE SET
                    owned = CASE
                        WHEN game_platforms.manual_overrides IS NOT NULL
@@ -571,6 +577,7 @@ async def upsert_game_platform(
                                 SELECT value FROM json_each(game_platforms.manual_overrides))
                        THEN game_platforms.unowned_at
                        WHEN excluded.owned = 1 THEN NULL
+                       WHEN game_platforms.owned = 1 THEN excluded.unowned_at
                        ELSE game_platforms.unowned_at
                    END,
                    last_seen_in_source = COALESCE(
@@ -597,7 +604,7 @@ async def upsert_game_platform(
                    END,
                    last_synced = excluded.last_synced""",
             (game_id, platform, owned, playtime_minutes, playtime_2weeks_minutes,
-             last_played, now, seen_at),
+             last_played, now, seen_at, unowned_at),
         )
         row = await db.execute_fetchone(
             "SELECT id FROM game_platforms WHERE game_id = ? AND platform = ?",

@@ -195,6 +195,40 @@ class RetireOwnershipTests(ToolDBTestCase):
             )
 
 
+class SourceReportedLapseTests(ToolDBTestCase):
+    """A source can positively report that a license lapsed (PSN entitlements
+    say so for a PS Plus catalog title) — distinct from a row it merely stopped
+    returning, which nothing acts on."""
+
+    async def test_a_lapse_stamps_unowned_at_once_and_a_re_own_clears_it(self):
+        game_id = await seed_game("Moving Out")
+        await db_module.upsert_game_platform(game_id, "ps5", owned=1, from_source=True)
+
+        await db_module.upsert_game_platform(game_id, "ps5", owned=0, from_source=True)
+        row = await _platform_row(game_id, "ps5")
+        self.assertEqual(row["owned"], 0)
+        stamped = row["unowned_at"]
+        self.assertIsNotNone(stamped)
+        # Not pinned: the source decided, so the source may undo it.
+        self.assertIsNone(row["manual_overrides"])
+
+        # Still lapsed next sync: the stamp keeps the FIRST time it was seen.
+        await db_module.upsert_game_platform(game_id, "ps5", owned=0, from_source=True)
+        self.assertEqual((await _platform_row(game_id, "ps5"))["unowned_at"], stamped)
+
+        # Back in the catalog: owned again, stamp cleared.
+        await db_module.upsert_game_platform(game_id, "ps5", owned=1, from_source=True)
+        row = await _platform_row(game_id, "ps5")
+        self.assertEqual((row["owned"], row["unowned_at"]), (1, None))
+
+    async def test_a_row_first_seen_lapsed_is_minted_retired(self):
+        game_id = await seed_game("Overcooked! 2")
+        await db_module.upsert_game_platform(game_id, "ps5", owned=0, from_source=True)
+        row = await _platform_row(game_id, "ps5")
+        self.assertEqual(row["owned"], 0)
+        self.assertIsNotNone(row["unowned_at"])
+
+
 class LastSeenInSourceTests(ToolDBTestCase):
     async def test_only_a_source_write_stamps_the_column(self):
         game_id = await seed_game("Citizen Sleeper")
