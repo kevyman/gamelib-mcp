@@ -13,6 +13,13 @@ All notable changes to gamelib-mcp. The format follows
   or most expensive one; a new *standout* tier counts acclaimed, prominent
   games as wanted; price is a sanity check and bundled-before a tiebreaker.
 
+### Security
+- Upgraded eight locked dependencies with published advisories: fastmcp
+  4.0.11 → 4.2.0 (floor raised to 4.1.2), authlib 1.9.5, aiohttp 3.14.5,
+  joserfc 1.8.0, certifi, dnspython 2.9.2, opentelemetry-api 1.45.2 and
+  soupsieve. The serializer-warning filter now also matches FastMCP's own
+  call site, where 4.2 raises the warning.
+
 ## [1.0.1] — 2026-10-07
 
 ### Fixed
