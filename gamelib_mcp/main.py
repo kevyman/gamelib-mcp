@@ -94,12 +94,16 @@ def install_warning_filters() -> None:
     payload is unchanged. FastMCP 4's own output-schema validation still
     rejects a dict that does not match the declared schema, so a real shape
     bug surfaces as a tool error, not a swallowed warning.
+
+    The warning is attributed to whichever Python frame calls into
+    pydantic-core: pydantic's TypeAdapter up to FastMCP 4.0, FastMCP's own
+    `tools/base.py` (which calls the core serializer directly) from 4.2.
     """
     warnings.filterwarnings(
         "ignore",
         message=r"^Pydantic serializer warnings",
         category=UserWarning,
-        module=r"^pydantic\.",
+        module=r"^(pydantic|fastmcp)\.",
     )
 
 
