@@ -67,7 +67,9 @@ class ClientEraWireTests(ProtocolEraMixin, unittest.IsolatedAsyncioTestCase):
         lines = _era_lines(logs)
         self.assertEqual(len(lines), 1, lines)
         self.assertIn(f"protocol={self.protocol_version}", lines[0])
-        self.assertIn("name=mcp", lines[0])
+        # The in-memory test client's self-reported name: "fastmcp" since
+        # FastMCP 4.2, "mcp" (the SDK default) before.
+        self.assertRegex(lines[0], r"name=(fast)?mcp\b")
         self.assertNotIn("version=?", lines[0])
 
     async def test_repeat_request_logs_no_second_info_line(self):
