@@ -6,6 +6,13 @@ All notable changes to gamelib-mcp. The format follows
 
 ## [Unreleased]
 
+### Changed
+- `bundle-evaluation` 2.0.0: quality leads, money confirms. Every unowned
+  constituent is ranked by sample-adjusted rating before any triage or
+  pricing; the headliner is the best-rated wanted game, never the scarcest
+  or most expensive one; a new *standout* tier counts acclaimed, prominent
+  games as wanted; price is a sanity check and bundled-before a tiebreaker.
+
 ### Security
 - Upgraded eight locked dependencies with published advisories: fastmcp
   4.0.11 → 4.2.0 (floor raised to 4.1.2), authlib 1.9.5, aiohttp 3.14.5,
