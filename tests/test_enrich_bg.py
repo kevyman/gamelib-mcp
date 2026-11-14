@@ -3,6 +3,7 @@ import contextlib
 import sqlite3
 import unittest
 from contextlib import ExitStack
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -298,6 +299,9 @@ class HltbQuiescenceTests(ToolDBTestCase):
 
     async def test_a_not_found_marker_counts_and_stops_the_reclaim(self) -> None:
         game_ids = await self._seed_claimable(3)
+        # Stamped "now": the marker only suppresses re-claiming for 30 days, so
+        # a fixed date turns this test red once the calendar passes it.
+        marker = f"NOT_FOUND:{datetime.now(UTC).isoformat()}"
 
         async def fetch(game_id: int, _name: str) -> None:
             # What the real provider does when HLTB answers "no such game":
@@ -305,7 +309,7 @@ class HltbQuiescenceTests(ToolDBTestCase):
             async with db_module.get_db() as db:
                 await db.execute(
                     "UPDATE games SET hltb_cached_at = ? WHERE id = ?",
-                    ("NOT_FOUND:2026-09-10T00:00:00+00:00", game_id),
+                    (marker, game_id),
                 )
                 await db.commit()
 
@@ -320,7 +324,7 @@ class HltbQuiescenceTests(ToolDBTestCase):
         self.assertEqual(total, len(game_ids))
         for game_id in game_ids:
             row = await self._row(game_id)
-            self.assertEqual(row["hltb_cached_at"], "NOT_FOUND:2026-09-10T00:00:00+00:00")
+            self.assertEqual(row["hltb_cached_at"], marker)
             # A row that MOVED gets its claim released — the marker is what
             # keeps it out of the queue now.
             self.assertIsNone(row["hltb_claimed_at"])
