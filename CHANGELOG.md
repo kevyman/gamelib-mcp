@@ -6,6 +6,13 @@ All notable changes to gamelib-mcp. The format follows
 
 ## [Unreleased]
 
+### Changed
+- `bundle-evaluation` 2.0.0: quality leads, money confirms. Every unowned
+  constituent is ranked by sample-adjusted rating before any triage or
+  pricing; the headliner is the best-rated wanted game, never the scarcest
+  or most expensive one; a new *standout* tier counts acclaimed, prominent
+  games as wanted; price is a sanity check and bundled-before a tiebreaker.
+
 ## [1.0.1] — 2026-10-07
 
 ### Fixed

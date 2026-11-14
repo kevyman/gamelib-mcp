@@ -1,16 +1,25 @@
 ---
 name: bundle-evaluation
 description: Decide whether the user should buy a game BUNDLE — Humble Bundle/Choice, Fanatical build-your-own, platform-sale multi-game sets, any list of games with one price. Triggers: "is this bundle worth it", "should I grab this month's Humble Choice", a pasted game list + price, "worth it for X alone?". NOT for one named game (game-quality) and NOT for picking what to play (backlog-triage).
-version: "1.3.0"
+version: "2.0.0"
 ---
 
 # Bundle Evaluation
 
-A bundle is worth **what you'd pay for the games you actually want in it — nothing else**. Games the user already owns contribute nothing. Filler they'll never launch contributes nothing, whatever its Steam rating. The publisher's "$466 value!" MSRP-sum is price anchoring and never enters the math. The honest comparison is:
+A bundle is worth **the good games in it that the user doesn't have and would actually want — nothing else**. Games the user already owns contribute nothing. Filler they'll never launch contributes nothing. The publisher's "$466 value!" MSRP-sum is price anchoring and never enters the math.
 
-> bundle price **vs.** the sum of realistic individual prices (historical lows) of the *wanted subset only*.
+## Priority order (2.0.0) — quality leads, money confirms
 
-Everything below exists to compute those two numbers honestly and turn them into one verdict: **Buy / Buy at a lower tier / Buy only if you want X and Y / Skip**.
+A bundle is almost always a deal on paper; that is what a bundle *is*. So "is it cheap?" is rarely the question that decides anything. The evidence is weighed in this order, and a lower line never overrides a higher one:
+
+1. **Quality** — how good is each unowned game, by sample-adjusted rating (Step 1b)? This is computed for **every** unowned constituent and ranks them.
+2. **Desirability** — does the user want it: taste fit, completing a series they collect, a big property, a game people are genuinely talking about (Step 2)?
+3. **Price** — does the bundle beat the realistic cost of the wanted games (Step 4)? A sanity check that a good lineup isn't overpriced, never the reason to buy a weak one.
+4. **Bundled-before / scarcity** — a distant tiebreaker between otherwise equal calls. Never a reason on its own.
+
+**The headliner is the best wanted game, never the most expensive or the scarcest one.** A game that has never been bundled, or whose historical low sits above the bundle price, is not thereby a good game — price history measures the publisher's discount policy, not quality. The incident behind this rule: a bundle was recommended entirely on one never-bundled title whose all-time low exceeded the bundle price; ranked by SteamDB rating it was 11th of ~15, and the ten better games were never mentioned. The verdict must be argued from the top of the quality ranking down.
+
+The output is one verdict: **Buy / Buy at a lower tier / Buy only if you want X and Y / Skip**.
 
 ## Scope: this skill vs. its siblings
 
@@ -46,7 +55,7 @@ Note the structure while you're there:
   The join is per-platform and the `last_played >= acquired` guard is deliberate: play on
   another platform's copy, or family-share play predating the claim, is not evidence the
   claimed copy gets launched — without them the gate credits months for engagement the
-  subscription never caused. If the answer is ≈0, the default verdict for this month is **Skip (pause)**, overridable only by a must-have or collection-want whose realistic solo price clears the month price on its own. State the record in the verdict ("last 6 claimed months: 0 games launched"). Backtesting against a real subscription history showed the skill saying Buy on months where nothing was ever launched — this gate is what was missing.
+  subscription never caused. If the answer is ≈0, the default verdict for this month is **Skip (pause)**, overridable only by a must-have, standout or collection-want whose realistic solo price clears the month price on its own. State the record in the verdict ("last 6 claimed months: 0 games launched"). Backtesting against a real subscription history showed the skill saying Buy on months where nothing was ever launched — this gate is what was missing.
 
 ## Step 1: Ownership screen
 
@@ -66,24 +75,40 @@ Each hit carries `owned`, `wishlisted`, and the full `platforms` array (with `pr
   3. A `match_type: "fuzzy"` hit follows game-quality's rule: trust it only if the queried title is plainly among the results.
 - **DLC/edition constituents** resolve via the nested-content fallback — a DLC whose base game the user doesn't own is filler by default (game-quality's DLC rule: base unplayed → hard skip, base loved → often the best value-per-joy in the bundle).
 
+## Step 1b: Quality rank — every unowned constituent
+
+Before any triage, fit or price work, rank **all** unowned constituents by quality. This is the pass that stops one game's price history from standing in for the whole bundle, and it is cheap — numbers only, no per-game assessment calls:
+
+1. Collect all-time Steam positive % and review count for each unowned game. SteamDB shows both (and its own "SteamDB rating", which is the formula below); barter.vg and ITAD bundle pages list review % and count for every constituent on one page — prefer the single-page source. Add OpenCritic / Metacritic where they exist.
+2. Compute the sample-adjusted score — the same formula as game-quality's craft score, so the two skills never disagree:
+
+   `adjusted = p − (p − 0.5) × 2^(−log₁₀(n + 1))`
+
+   This one pass is done by hand precisely because `get_assessment_context` has no batch mode (Step 3 still uses it for the shortlist). A 97% from 80 reviews must land below a 91% from 40,000 — that is the point.
+3. Rank, and band each game with game-quality's bands (≥0.92 elite · 0.85–0.92 excellent · 0.78–0.85 very good · 0.70–0.78 good but divisive · <0.70 caution). `n < 50` is **unrated** — it sorts to the bottom and cannot headline. A game with no Steam presence (console-only) is placed by OpenCritic/Metacritic and marked as critic-ranked.
+4. Carry the rank through the rest of the evaluation. It orders the verdict table (Step 5), gates the tiers (Step 2), and decides which game the verdict leads with.
+
+Caveats, stated when they move a rank: genre calibration (roguelites and cozy games cluster high, strategy and sports run low — game-quality Step 1), a regressing recent score, and critics disagreeing with players. A game unknown to you is searched like any other; never rank from memory.
+
 ## Step 2: Triage to the wanted shortlist
 
-Do **not** run a full assessment on every constituent — a 12-game bundle would cost 12+ tool calls to mostly conclude "filler". Triage first, cheaply:
+Work **down the Step 1b ranking**, best-rated first, so the strongest games are considered before anything else is. Do **not** run a full assessment on every constituent — a 12-game bundle would cost 12+ tool calls to mostly conclude "filler". Triage first, cheaply:
 
 1. `get_stats(report="taste")` once — the high/low-affinity tags.
 2. **Get tags for the unowned constituents — the library cannot give you them.** Search results carry review and critic signal (`steam_review_desc`, `metacritic_score`, `opencritic_score`, `hltb_main`) but *no tags at all*, and an unowned game returns no row in the first place. So the tags this step compares against the profile have to come from outside: the bundle/store page usually lists genre per title, and an ITAD bundle page gives Steam tags for every constituent in one fetch — that single page covers the whole bundle and is the cheapest source. Do this before assigning tiers rather than guessing from the title, or unfamiliar games get dumped into filler because you didn't recognise them.
 3. Cross those tags plus the review signal against the profile and the standing priors. Standing priors come from the profile, not from this file: the top and bottom affinity tags from `get_stats(report="taste")` and the `fit`/`anchors` blocks of `get_assessment_context`. Multiplayer-only and live-service games carry a hard fit penalty by default — a profile built from rated single-player games has no affinity rows for those modes at all, so their absence is not evidence — unless the user's own words or a played, well-rated live-service anchor in the library say otherwise. The negative-tag penalties punish **modes, not genres**: a single-player campaign with strong reviews does not inherit the multiplayer/military/tactical/violent penalty from its genre tags. Check the library first — if the user has real playtime on same-franchise or same-genre titles, the penalty doesn't apply (backtest: a military shooter that was later completed got filed filler off "military/tactical" while played entries of its own series sat right there in the ownership screen).
-4. Sort every constituent into want-tiers:
+4. Sort every constituent into want-tiers. **Quality gates the top tiers**: a game below the *very good* band (adjusted < 0.78, with no critic acclaim to contradict it) or unrated cannot be a must-have or a standout unless the user wishlisted it or asked for it by name — fit, scarcity and price never lift a mediocre game into the case for buying. And nothing in the top third of the ranking is filed as filler without a stated reason (hard fit penalty, DLC without base, already-owned substitute) — "didn't recognise it" is not one.
    - **Must-have** — the user would plausibly buy it on its own. Full assessment in Step 3. **Tag fit alone doesn't mint a must-have**: promote only with (a) a wishlist entry or a series/franchise they have actually played, or (b) profile-tag fit *plus* a played (≥2h, non-farmed) library neighbor in the same genre. The affinity profile measures what the user rates highly when they play — aspiration; the playtime record measures what they reach for — behavior; must-have needs both. The short/emotional/story-rich cluster is the proven trap (backtest: must-haves minted on those tags alone almost all went unlaunched). Fit without corroboration caps at nice — unless it qualifies as a collection-want below.
+   - **Standout** — top-of-ranking quality plus prominence: *excellent* band or better on a real sample (or OpenCritic ≥ 85), **and** a big property, an award winner, or a game that is widely and currently talked about. This is desirability the taste profile cannot see — the profile only knows what the user has already played — so it does **not** need a played neighbor. It counts as wanted. It still loses to a hard fit penalty (multiplayer-only, live-service) and to an unplayed near-substitute already on the shelf. Buzz is *purchase-preference* evidence here; the quality claim rests on the Step 1b number, never on the buzz.
    - **Collection-want** — applies only when the library shows collecting behaviour; for a user who collects, completing a series is real value *independent of whether they'll launch it soon*. A constituent earns this tier only with **all three**: (1) it fills a hole in a series the user demonstrably collects — ≥2 entries already in the library, acquired deliberately over time (`get_stats(report="series")` / the Step 1 acquisition data show this); (2) it carries strong acclaim or genuine anticipation — high critic score, a big well-received release, or the user saying they're excited (hype is legitimate *purchase-preference* evidence here, even though it stays banned as *quality* evidence per game-quality); (3) the bundle gets it at a genuinely good price vs. its realistic cost — collection value converts on deals. Playtime on the earlier entries is **not** required — owned-but-unplayed does not disqualify (requiring play wrongly rejects an entry the user is genuinely excited for). But the series relationship must pre-exist: a franchise the user owns none or one of is not a collection (a whole saga bought in one go with no prior history is the trap — top tier, zero play, not bought again), and a themed compilation of retro one-offs is not a series.
    - **Nice** — would play if it showed up, wouldn't seek out. Counts at a heavy discount in Step 4; assess fully only if the verdict turns on it.
    - **Filler** — wrong genre, live-service, DLC without the base, shovelware. Worth **nothing**, never "might play someday". In a large, mostly-unplayed library, an unwanted free game is a backlog tax, not upside.
 
-Expect the shortlist to be small: 0–5 games. If it's 0, the verdict is already Skip — go straight to Step 5.
+Expect the shortlist to be small: 0–5 games. If it's 0, the verdict is already Skip — go straight to Step 5. The **headliner** is the highest-ranked game on the shortlist; name it now, before any price is looked up.
 
 ## Step 3: Assess the shortlist (game-quality methodology, capped)
 
-For each must-have (and any verdict-deciding nice-tier game), run game-quality's core loop:
+For each must-have and standout (and any verdict-deciding nice-tier game), run game-quality's core loop:
 
 - Web-search Steam review numbers, then `get_assessment_context(name=..., steam_positive_pct=..., steam_total_reviews=..., ...)` for sample-adjusted craft, fit, and anchors. `get_game_detail` for OpenCritic/ProtonDB/DLC links where needed.
 - **Never call `get_assessment_context` for all N constituents** — shortlist only. It has no batch mode, and per-filler assessment is exactly the effort explosion the triage exists to prevent.
@@ -92,14 +117,14 @@ For each must-have (and any verdict-deciding nice-tier game), run game-quality's
 
 Anything that comes out "probable miss" or worse drops to filler. The survivors are the **wanted subset**.
 
-## Step 4: Value math
+## Step 4: Price check (after quality and desirability, never before)
 
-Price the wanted subset per game — what would acquiring *this game, the way they'd actually want it* really cost outside the bundle?
+By now the wanted subset and its headliner are fixed. Price does not get to change them — it only answers "is this lineup overpriced, and at which tier does it stop paying off?". Price the wanted subset per game — what would acquiring *this game, the way they'd actually want it* really cost outside the bundle?
 
 - **Wishlisted games**: `get_wishlist(with_prices=True)` — live best price, cut %, and the cross-platform recommendation. Respect `recommendation_reason`: the hardware-preference order is stored server-side (`set_hardware_preference`), not a rule to hardcode, and a preferred-platform version is only overridden when another platform is dramatically cheaper. If the bundle's keys land on a platform the recommendation argues *against*, that game's contribution shrinks — a Steam key is not a Switch 2 copy.
 - **Unwishlisted wanted games**: web-search current price and historical low (ITAD / gg.deals / DekuDeals). If a game is wanted *regardless of this bundle*, offering to wishlist it first (`add_game_to_platform(..., owned=False, identifier_type="steam_appid", identifier_value=...)`) is legitimate — it's a real want-to-play signal and gets live ITAD pricing — but it is a library write; say so, don't do it silently.
 - **No ITAD key configured**: `get_wishlist(with_prices=True)` returns `"itad": "unconfigured"` and Steam titles land in `unpriced`. Degrade to web-searched prices and say the comparison is web-sourced; the methodology still works.
-- **Use historical lows, not list prices**, as each game's realistic cost: most games hit −50% within 18 months. **Say which store the low came from** — gg.deals and ITAD both mix official stores with grey-market keyshops (Yuplay, Instant Gaming, Kinguin), and a keyshop low is often a fraction of the official one. Compare like with like: if the bundle sells official Steam keys, an official-store low is the honest comparison, with the keyshop price mentioned as a caveat, not as the headline. Then apply the **bundled-before decay**: a game bundled many times recently will be this cheap again soon (skipping is cheap); a never-bundled recent title at a first-ever discount is genuinely scarce (skipping is expensive). Cite the count/recency from Step 0's sources when it moves the verdict.
+- **Use historical lows, not list prices**, as each game's realistic cost: most games hit −50% within 18 months. **Say which store the low came from** — gg.deals and ITAD both mix official stores with grey-market keyshops (Yuplay, Instant Gaming, Kinguin), and a keyshop low is often a fraction of the official one. Compare like with like: if the bundle sells official Steam keys, an official-store low is the honest comparison, with the keyshop price mentioned as a caveat, not as the headline. **Bundled-before is a tiebreaker only**: on a genuinely close call, a game bundled many times recently will be this cheap again soon (skipping is cheap), while a never-bundled wanted title is harder to get later (skipping costs a little more). It can tip a borderline verdict about a game that is *already wanted on quality and desirability*; it never makes a game wanted, never picks the headliner, and a never-bundled mid-ranked game is still a mid-ranked game. Mention count/recency in one line at most.
 - **Tiered/BYO bundles**: walk tiers marginally. Tier N+1 pays off only if the games it adds are themselves wanted at that marginal price — "Buy at lower tier" is a first-class verdict.
 - **The user's own track record as evidence.** Two different sources, and it matters which says what. `get_stats(report="spending")` → `by_bundle` is **spend-only** — bundle name, currency, total spent, constituent count. It does *not* carry playtime, so it can never answer "did they play the last one"; treat it as "how much has gone into bundles" and nothing more. The play side comes free from Step 1: the ownership screen already returned `playtime_hours` per owned constituent, so "they own 6 of these 7 and have played 2 hours across all of them" is a fact you already hold. That is the sharpest evidence in the whole evaluation — lead with it. `report="backlog"` → `unplayed_spend` grounds "do they need 8 more games". All descriptive evidence, never a score — and per-game cost-per-hour stays banned exactly as in game-quality.
 
@@ -110,20 +135,33 @@ ALWAYS this structure:
 ```
 **[Bundle] — [price]** ([N] games: [n_owned] owned, [n_wanted] wanted, [n_filler] filler)
 
-| Game | Owned? | Want | Why (one line) | Marginal value |
-|---|---|---|---|---|
-| Headliner | no | must-have | strong fit — anchors: X, Y · hist. low [price] | [price] |
-| Game B | Steam (2019, [price paid]) | — | already owned | zero |
-| Game C | no | filler | live-service, hard fit penalty | zero |
+| # | Game | Quality | Owned? | Want | Why (one line) | Realistic price |
+|---|---|---|---|---|---|---|
+| 1 | Headliner | 0.91 excellent (94% of 38k) | no | must-have | strong fit — anchors: X, Y | [price] |
+| 2 | Game D | 0.88 excellent (OC 86) | no | standout | big property, widely discussed | [price] |
+| 3 | Game C | 0.84 very good | no | filler | live-service, hard fit penalty | — |
+| 9 | Game E | 0.71 divisive (never bundled) | no | filler | mid-ranked; scarcity is not quality | — |
+| — | Game B | — | Steam (2019, [price paid]) | — | already owned | — |
 ...
 
+Best of the bundle: [top 3 unowned by quality, and whether each is wanted]
 Wanted subset: [games] ≈ [sum] vs. bundle [price]
-[bundled-before / platform-mismatch / tier notes, one or two lines]
+[platform-mismatch / tier / bundled-before notes, one or two lines]
 
 Verdict: [Buy / Buy at [price] tier / Buy only if you want [X] and [Y] / Skip]
 ```
 
-Apply the buy trigger honestly: **≥2 wanted games whose combined realistic price clears the bundle price, or 1 wanted game whose realistic price alone does.** "Worth it for X alone" is only true when `bundle price ≤ historical low of X` — it rarely is; say so when it isn't. For a Choice/subscription month the trigger is stricter: only **must-have and collection-want** games count toward it (nice-tier value is margin, never the case), and price them *after* the bundled-before decay — a regularly-bundled indie's realistic cost is its next bundle appearance, not its ITAD low. With ~8 games a month, "two wanted games clear $12" is no bar at all; the bar is "this month beats the pause button", answered with Step 0's claim-to-launch record in evidence. Confidence statement is mandatory when the shortlist assessment ran on thin data.
+Rows are sorted by the Step 1b quality rank (`#`), unowned first, **every** constituent listed — the user must be able to see where the headliner sits among its bundle-mates. Owned games go at the bottom.
+
+Apply the buy trigger in priority order:
+
+1. **Quality + desirability decide.** Buy needs a wanted subset that is actually good: at least one wanted game in the *excellent* band or better, or two in *very good* or better. A bundle whose wanted games are all mid-ranked is a Skip **however cheap it is** — a deal on games that aren't good is not a deal.
+2. **Price confirms.** The wanted subset's combined realistic price should clear the bundle price. It usually does; when it doesn't, the answer is a lower tier or "wishlist the one you want".
+3. **"Worth it for X alone"** is only true when X is the headliner by quality (top of the ranking among wanted games, *excellent* or better) **and** `bundle price ≤ historical low of X`. A price-history win by a game ranked in the bottom half is not this case — say where it ranks and move on.
+
+The verdict text discusses the top of the ranking, not one game: name the best two or three unowned games and why each is or isn't wanted.
+
+For a Choice/subscription month the trigger is stricter: only **must-have, standout and collection-want** games count toward it (nice-tier value is margin, never the case), and price them *after* the bundled-before decay — a regularly-bundled indie's realistic cost is its next bundle appearance, not its ITAD low. With ~8 games a month, "two wanted games clear $12" is no bar at all; the bar is "this month beats the pause button", answered with Step 0's claim-to-launch record in evidence. Confidence statement is mandatory when the shortlist assessment ran on thin data.
 
 If the verdict is Skip but a constituent is genuinely wanted, close the loop: offer to wishlist it so the deals machinery watches its price instead.
 
@@ -140,6 +178,11 @@ If the user buys it, the evaluation's constituent list becomes the acquisition r
 
 ## Anti-patterns (never do these)
 
+- Building the case on one game's price history — "never bundled", "never been this cheap", "its low is above the bundle price" — without saying where that game ranks on quality. Scarcity and discount depth are not quality.
+- Naming a headliner before the Step 1b ranking exists, or naming one that isn't the best-rated wanted game.
+- Discussing a single constituent and leaving the rest of the lineup unranked and unmentioned.
+- Ranking on raw positive % — a tiny-sample 98% is not a top game; use the adjusted score.
+- Recommending a bundle because it is cheap when nothing wanted in it is good.
 - Quoting the publisher's MSRP-sum "value", or comparing the bundle price against anything but the wanted subset.
 - Counting owned games or filler as value — "12 games for 10 [currency]" is not an argument; "2 games the user wants for 10 [currency]" is.
 - Running `get_assessment_context` (or full game-quality) on every constituent instead of triaging first.
