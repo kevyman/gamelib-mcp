@@ -1,6 +1,6 @@
 # Digest-pinned (multi-arch index) so a retagged base image cannot change what
 # ships; Dependabot's docker entry moves it forward. Tag kept for readability.
-FROM python:3.12-slim@sha256:e5c9fa26ffb76e11e0f054f30dc2523a2f9693f0c36c0cf1e39b27e152d899fc
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive \
     DATABASE_URL=file:/data/gamelib.db \
