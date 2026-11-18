@@ -620,7 +620,9 @@ def inspect_psn(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
 
 
 _XBOX_REMEDIATION = (
-    'Run create_session_ingest_link(provider="xbox") and paste a fresh OpenXBL API key.'
+    "Sign out and back in at https://xbl.io to re-link your Microsoft account; if "
+    'sync still fails, run create_session_ingest_link(provider="xbox") and paste a '
+    "fresh OpenXBL API key."
 )
 
 
@@ -639,7 +641,7 @@ def inspect_xbox(last_sync: LastSyncMeta | None = None) -> IntegrationStatus:
             platform="xbox",
             overall_status="stale",
             active_backend="openxbl",
-            summary="OpenXBL auth appears stale; the API key may need to be regenerated.",
+            summary="OpenXBL auth appears stale; Xbox Live rejected the linked account.",
             capabilities=[
                 CapabilityStatus("ownership", "stale", "OpenXBL auth must be refreshed before title history can be read."),
                 CapabilityStatus("playtime", "stale", "OpenXBL auth must be refreshed before playtime can be read."),

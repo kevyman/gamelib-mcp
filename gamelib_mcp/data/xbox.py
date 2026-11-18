@@ -104,6 +104,45 @@ def _headers() -> dict[str, str]:
     }
 
 
+class OpenXBLAuthError(RuntimeError):
+    """OpenXBL accepted the API key but Xbox Live rejected the account's auth."""
+
+
+def _unwrap_openxbl(payload: Any, endpoint: str) -> Any:
+    """Return the useful body of an OpenXBL response, raising on an upstream error.
+
+    OpenXBL answers HTTP 200 with an envelope ``{"content": ..., "code": N}``
+    where ``code`` is the status of ITS call to Xbox Live — an upstream 401
+    arrives as ``{"content": {}, "code": 401}``, not as an HTTP error. (A bad
+    OpenXBL key, by contrast, is a real HTTP 401 that ``raise_for_status``
+    catches.) Payloads without the envelope pass through unchanged.
+    """
+    if not (isinstance(payload, dict) and "content" in payload and "code" in payload):
+        return payload
+    code = payload.get("code")
+    status: int | None = None
+    if isinstance(code, (int, str)) and not isinstance(code, bool):
+        try:
+            status = int(code)
+        except ValueError:
+            status = None
+    if status in (401, 403):
+        raise OpenXBLAuthError(
+            f"OpenXBL accepted the API key, but Xbox Live rejected the account's "
+            f"authorization (upstream {status} on {endpoint}) — sign out and back in "
+            "at https://xbl.io to re-link your Microsoft account"
+        )
+    if status is not None and not 200 <= status < 300:
+        raise RuntimeError(f"OpenXBL {endpoint} failed upstream with code {status}")
+    return payload.get("content")
+
+
+def _describe_shape(payload: Any) -> str:
+    if isinstance(payload, dict):
+        return "object with keys " + (", ".join(sorted(map(str, payload))[:10]) or "(none)")
+    return type(payload).__name__
+
+
 def _extract_title(entry: Any) -> tuple[str | None, str | None]:
     if not isinstance(entry, dict):
         return None, None
@@ -141,10 +180,12 @@ async def fetch_xbox_titles(xuid: str | None = None) -> list[dict]:
     async with httpx.AsyncClient(timeout=_OPENXBL_TIMEOUT, headers=_headers()) as client:
         resp = await client.get(url)
         resp.raise_for_status()
-        payload = resp.json()
+        payload = _unwrap_openxbl(resp.json(), "titleHistory")
     titles = payload.get("titles") if isinstance(payload, dict) else None
     if not isinstance(titles, list):
-        raise RuntimeError("unexpected OpenXBL titleHistory payload")
+        raise RuntimeError(
+            f"unexpected OpenXBL titleHistory payload ({_describe_shape(payload)})"
+        )
     return [t for t in titles if isinstance(t, dict)]
 
 
@@ -152,7 +193,7 @@ async def _resolve_xuid(client: httpx.AsyncClient) -> str | None:
     """Return the API key owner's own xuid via GET /account."""
     resp = await client.get(f"{_OPENXBL_BASE}/account")
     resp.raise_for_status()
-    payload = resp.json()
+    payload = _unwrap_openxbl(resp.json(), "account")
     profile_users = payload.get("profileUsers") if isinstance(payload, dict) else None
     if not isinstance(profile_users, list) or not profile_users:
         return None
@@ -234,7 +275,7 @@ async def fetch_xbox_playtime(title_ids: list[str], xuid: str | None = None) -> 
             }
             resp = await client.post(f"{_OPENXBL_BASE}/player/stats", json=body)
             resp.raise_for_status()
-            payload = resp.json()
+            payload = _unwrap_openxbl(resp.json(), "player/stats")
     except Exception as exc:
         logger.warning("Xbox playtime unavailable: %s", exc)
         return {}
@@ -269,6 +310,16 @@ async def sync_xbox() -> dict:
 
     try:
         titles = await fetch_xbox_titles(xuid)
+    except OpenXBLAuthError as exc:
+        logger.warning("Xbox sync failed: %s", exc)
+        return {
+            "added": 0,
+            "matched": 0,
+            "skipped": 0,
+            "sync_status": "stale",
+            "error_summary": f"Xbox sync failed: {exc}",
+            "error_classification": "auth_stale",
+        }
     except Exception as exc:
         logger.warning("Xbox sync failed: %s", exc)
         return {
