@@ -241,12 +241,108 @@ class FetchXboxTitlesTests(unittest.TestCase):
 
         with (
             patch("gamelib_mcp.data.xbox.httpx.AsyncClient", return_value=_FakeClient()),
-            self.assertRaises(RuntimeError),
+            self.assertRaises(RuntimeError) as ctx,
         ):
             asyncio.run(xbox.fetch_xbox_titles())
 
+        # The message names what DID arrive, so the next drift is diagnosable.
+        self.assertIn("unexpected", str(ctx.exception))
+        self.assertNotIsInstance(ctx.exception, xbox.OpenXBLAuthError)
+
+    def _fetch_with_payload(self, payload):
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = payload
+
+        class _FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def get(self, *_args, **_kwargs):
+                return mock_response
+
+        with patch("gamelib_mcp.data.xbox.httpx.AsyncClient", return_value=_FakeClient()):
+            return asyncio.run(xbox.fetch_xbox_titles())
+
+    def test_fetch_xbox_titles_unwraps_content_envelope(self):
+        titles = self._fetch_with_payload({"content": _SAMPLE_TITLE_HISTORY, "code": 200})
+        self.assertEqual(len(titles), 3)
+        self.assertEqual(titles[0]["titleId"], "1030027286")
+
+    def test_fetch_xbox_titles_upstream_401_is_an_auth_error(self):
+        # Observed in prod 2026-11-18: a VALID key (a bogus one is a real HTTP
+        # 401) whose Xbox Live link was rejected comes back HTTP 200 with this.
+        with self.assertRaises(xbox.OpenXBLAuthError) as ctx:
+            self._fetch_with_payload({"content": {}, "code": 401})
+        self.assertIn("xbl.io", str(ctx.exception))
+
+    def test_fetch_xbox_titles_upstream_server_error_is_not_auth(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self._fetch_with_payload({"content": {}, "code": 503})
+        self.assertNotIsInstance(ctx.exception, xbox.OpenXBLAuthError)
+        self.assertIn("503", str(ctx.exception))
+
+
+class UnwrapOpenxblTests(unittest.TestCase):
+    def test_payload_without_envelope_passes_through(self):
+        payload = {"profileUsers": [{"id": "1"}]}
+        self.assertIs(xbox._unwrap_openxbl(payload, "account"), payload)
+
+    def test_string_code_is_read_as_status(self):
+        with self.assertRaises(xbox.OpenXBLAuthError):
+            xbox._unwrap_openxbl({"content": {}, "code": "403"}, "account")
+
+    def test_success_envelope_returns_content(self):
+        self.assertEqual(
+            xbox._unwrap_openxbl({"content": {"a": 1}, "code": 200}, "account"), {"a": 1}
+        )
+
 
 class FetchXboxPlaytimeTests(unittest.TestCase):
+    def test_fetch_xbox_playtime_unwraps_enveloped_account_and_stats(self):
+        account_response = MagicMock()
+        account_response.raise_for_status.return_value = None
+        account_response.json.return_value = {
+            "content": {"profileUsers": [{"id": "2535473210914202"}]},
+            "code": 200,
+        }
+        stats_response = MagicMock()
+        stats_response.raise_for_status.return_value = None
+        stats_response.json.return_value = {
+            "content": {
+                "groups": [
+                    {
+                        "titleId": "1030027286",
+                        "statlistscollection": [
+                            {"stats": [{"name": "MinutesPlayed", "value": "45"}]}
+                        ],
+                    }
+                ]
+            },
+            "code": 200,
+        }
+
+        class _FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def get(self, *_args, **_kwargs):
+                return account_response
+
+            async def post(self, *_args, **_kwargs):
+                return stats_response
+
+        with patch("gamelib_mcp.data.xbox.httpx.AsyncClient", return_value=_FakeClient()):
+            playtime = asyncio.run(xbox.fetch_xbox_playtime(["1030027286"]))
+
+        self.assertEqual(playtime, {"1030027286": 45})
+
     def test_fetch_xbox_playtime_parses_minutes_played(self):
         account_response = MagicMock()
         account_response.raise_for_status.return_value = None
@@ -405,6 +501,20 @@ class SyncXboxTests(unittest.TestCase):
         self.assertEqual(result["added"], 0)
         self.assertEqual(result["sync_status"], "failed")
         self.assertIn("boom", result["error_summary"])
+
+    def test_sync_xbox_upstream_auth_rejection_reports_auth_stale(self):
+        with (
+            patch.dict("os.environ", {"OPENXBL_API_KEY": "test-key"}, clear=False),
+            patch(
+                "gamelib_mcp.data.xbox.fetch_xbox_titles",
+                AsyncMock(side_effect=xbox.OpenXBLAuthError("Xbox Live rejected it")),
+            ),
+        ):
+            result = asyncio.run(xbox.sync_xbox())
+
+        self.assertEqual(result["sync_status"], "stale")
+        self.assertEqual(result["error_classification"], "auth_stale")
+        self.assertIn("Xbox Live rejected it", result["error_summary"])
 
     def test_sync_xbox_adds_new_game_by_title_id(self):
         titles = [{"titleId": "1030027286", "name": "Halo Infinite"}]
